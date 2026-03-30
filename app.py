@@ -24,32 +24,41 @@ def index():
 
 @app.route('/api/data')
 def get_data():
-    period = request.args.get('period', '7')  # '7', '30', '90'
-    try:
-        days = int(period)
-    except ValueError:
-        days = 7
+    start = request.args.get('start')
+    end   = request.args.get('end')
+    period = request.args.get('period')
 
     try:
         conn = get_db_connection()
         with conn.cursor() as cursor:
-            cursor.execute("""
-                SELECT date,
-                       sum_Total, sum_TEM, sum_SP,
-                       inc_Total, inc_TEM, inc_SP
-                FROM daily_data_count
-                ORDER BY date DESC
-                LIMIT %s
-            """, (days,))
+            if start and end:
+                cursor.execute("""
+                    SELECT date,
+                           sum_Total, sum_TEM, sum_SP,
+                           inc_Total, inc_TEM, inc_SP
+                    FROM daily_data_count
+                    WHERE date BETWEEN %s AND %s
+                    ORDER BY date ASC
+                """, (start, end))
+            else:
+                days = int(period) if period else 7
+                cursor.execute("""
+                    SELECT date,
+                           sum_Total, sum_TEM, sum_SP,
+                           inc_Total, inc_TEM, inc_SP
+                    FROM daily_data_count
+                    ORDER BY date DESC
+                    LIMIT %s
+                """, (days,))
             rows = cursor.fetchall()
         conn.close()
 
-        # 날짜 오름차순으로 정렬 (차트용)
-        rows = list(reversed(rows))
+        if not (start and end):
+            rows = list(reversed(rows))
 
         labels = [str(r['date']) for r in rows]
         return jsonify({
-            'labels': labels,
+            'labels':    labels,
             'sum_Total': [r['sum_Total'] for r in rows],
             'sum_TEM':   [r['sum_TEM']   for r in rows],
             'sum_SP':    [r['sum_SP']    for r in rows],
@@ -80,28 +89,106 @@ HTML_PAGE = '''<!DOCTYPE html>
             margin-bottom: 24px;
             font-size: 1.6em;
         }
-        .period-bar {
+
+        /* ── 컨트롤 전체 박스 ── */
+        .control-box {
+            max-width: 1000px;
+            margin: 0 auto 28px;
+            background: white;
+            border-radius: 10px;
+            padding: 18px 24px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
             display: flex;
-            justify-content: center;
-            gap: 10px;
-            margin-bottom: 28px;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 12px;
         }
-        .period-bar button {
-            padding: 8px 24px;
+        .control-label {
+            font-size: 0.85em;
+            color: #888;
+            width: 100%;
+            margin-bottom: -4px;
+        }
+
+        /* 빠른 선택 버튼 */
+        .btn-group {
+            display: flex;
+            gap: 8px;
+        }
+        .btn-group button {
+            padding: 7px 20px;
             border: 2px solid #3498db;
             background: white;
             color: #3498db;
             border-radius: 20px;
             cursor: pointer;
-            font-size: 0.95em;
+            font-size: 0.9em;
             font-weight: bold;
             transition: all 0.2s;
         }
-        .period-bar button.active,
-        .period-bar button:hover {
+        .btn-group button.active,
+        .btn-group button:hover {
             background: #3498db;
             color: white;
         }
+
+        /* 구분선 */
+        .divider {
+            width: 1px;
+            height: 32px;
+            background: #ddd;
+            margin: 0 4px;
+        }
+
+        /* 날짜 범위 선택 */
+        .date-range {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .date-range label {
+            font-size: 0.9em;
+            color: #555;
+        }
+        .date-range input[type="date"] {
+            padding: 6px 10px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-size: 0.9em;
+            color: #333;
+            cursor: pointer;
+        }
+        .date-range input[type="date"]:focus {
+            outline: none;
+            border-color: #3498db;
+            box-shadow: 0 0 0 2px rgba(52,152,219,0.2);
+        }
+        .btn-apply {
+            padding: 7px 18px;
+            background: #27ae60;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9em;
+            font-weight: bold;
+            transition: background 0.2s;
+        }
+        .btn-apply:hover { background: #219150; }
+
+        /* 선택된 기간 표시 */
+        .period-info {
+            margin-left: auto;
+            font-size: 0.85em;
+            color: #888;
+        }
+        .period-info span {
+            color: #3498db;
+            font-weight: bold;
+        }
+
+        /* 차트 영역 */
         .charts {
             display: flex;
             flex-direction: column;
@@ -123,13 +210,13 @@ HTML_PAGE = '''<!DOCTYPE html>
             padding-left: 10px;
         }
         .card h2.green { border-color: #27ae60; }
+
         .error-msg {
             text-align: center;
             color: #e74c3c;
             background: #fdecea;
             padding: 12px;
             border-radius: 6px;
-            margin-bottom: 20px;
             max-width: 1000px;
             margin: 0 auto 20px;
             display: none;
@@ -139,10 +226,28 @@ HTML_PAGE = '''<!DOCTYPE html>
 <body>
     <h1>Daily Data Count 일별 추이</h1>
 
-    <div class="period-bar">
-        <button onclick="loadData(7)"  id="btn7"  class="active">최근 7일</button>
-        <button onclick="loadData(30)" id="btn30">1개월</button>
-        <button onclick="loadData(90)" id="btn90">3개월</button>
+    <div class="control-box">
+        <div class="control-label">기간 선택</div>
+
+        <!-- 빠른 선택 버튼 -->
+        <div class="btn-group">
+            <button onclick="loadByPeriod(7)"  id="btn7"  class="active">최근 7일</button>
+            <button onclick="loadByPeriod(30)" id="btn30">1개월</button>
+            <button onclick="loadByPeriod(90)" id="btn90">3개월</button>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- 날짜 직접 선택 -->
+        <div class="date-range">
+            <label>시작일</label>
+            <input type="date" id="startDate">
+            <label>~&nbsp;종료일</label>
+            <input type="date" id="endDate">
+            <button class="btn-apply" onclick="loadByRange()">조회</button>
+        </div>
+
+        <div class="period-info">조회 기간: <span id="periodText">최근 7일</span></div>
     </div>
 
     <div class="error-msg" id="errorMsg"></div>
@@ -162,10 +267,18 @@ HTML_PAGE = '''<!DOCTYPE html>
         let sumChart = null;
         let incChart = null;
 
-        function setActiveButton(days) {
-            ['btn7','btn30','btn90'].forEach(id => document.getElementById(id).classList.remove('active'));
-            const map = {7:'btn7', 30:'btn30', 90:'btn90'};
-            if (map[days]) document.getElementById(map[days]).classList.add('active');
+        // 날짜 입력 기본값: 오늘 기준 최근 7일
+        (function initDates() {
+            const today = new Date();
+            const prior = new Date();
+            prior.setDate(today.getDate() - 6);
+            document.getElementById('endDate').value   = today.toISOString().slice(0,10);
+            document.getElementById('startDate').value = prior.toISOString().slice(0,10);
+        })();
+
+        function setActiveButton(id) {
+            ['btn7','btn30','btn90'].forEach(b => document.getElementById(b).classList.remove('active'));
+            if (id) document.getElementById(id).classList.add('active');
         }
 
         function buildChart(canvasId, labels, datasets, existing) {
@@ -192,24 +305,22 @@ HTML_PAGE = '''<!DOCTYPE html>
             });
         }
 
-        async function loadData(days) {
-            setActiveButton(days);
+        async function fetchAndRender(url, periodText, activeBtnId) {
+            setActiveButton(activeBtnId);
+            document.getElementById('periodText').textContent = periodText;
             const errEl = document.getElementById('errorMsg');
             errEl.style.display = 'none';
 
             try {
-                const res = await fetch('/api/data?period=' + days);
+                const res = await fetch(url);
                 const d = await res.json();
-
                 if (d.error) {
                     errEl.textContent = 'DB 오류: ' + d.error;
                     errEl.style.display = 'block';
                     return;
                 }
 
-                const labels = d.labels;
-
-                sumChart = buildChart('sumChart', labels, [
+                sumChart = buildChart('sumChart', d.labels, [
                     { label: 'sum_Total', data: d.sum_Total,
                       borderColor: '#3498db', backgroundColor: 'rgba(52,152,219,0.1)',
                       tension: 0.3, fill: false, pointRadius: 3 },
@@ -221,7 +332,7 @@ HTML_PAGE = '''<!DOCTYPE html>
                       tension: 0.3, fill: false, pointRadius: 3 }
                 ], sumChart);
 
-                incChart = buildChart('incChart', labels, [
+                incChart = buildChart('incChart', d.labels, [
                     { label: 'inc_Total', data: d.inc_Total,
                       borderColor: '#27ae60', backgroundColor: 'rgba(39,174,96,0.1)',
                       tension: 0.3, fill: false, pointRadius: 3 },
@@ -239,8 +350,32 @@ HTML_PAGE = '''<!DOCTYPE html>
             }
         }
 
+        function loadByPeriod(days) {
+            const labelMap = { 7: '최근 7일', 30: '최근 1개월', 90: '최근 3개월' };
+            const btnMap   = { 7: 'btn7', 30: 'btn30', 90: 'btn90' };
+            fetchAndRender('/api/data?period=' + days, labelMap[days], btnMap[days]);
+        }
+
+        function loadByRange() {
+            const start = document.getElementById('startDate').value;
+            const end   = document.getElementById('endDate').value;
+            if (!start || !end) {
+                alert('시작일과 종료일을 모두 선택해주세요.');
+                return;
+            }
+            if (start > end) {
+                alert('시작일이 종료일보다 클 수 없습니다.');
+                return;
+            }
+            fetchAndRender(
+                `/api/data?start=${start}&end=${end}`,
+                `${start} ~ ${end}`,
+                null   // 버튼 활성화 해제
+            );
+        }
+
         // 초기 로드
-        loadData(7);
+        loadByPeriod(7);
     </script>
 </body>
 </html>'''
