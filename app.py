@@ -1,5 +1,7 @@
 from flask import Flask, jsonify, request
 import pymysql
+import threading
+import webbrowser
 
 app = Flask(__name__)
 
@@ -382,4 +384,9 @@ HTML_PAGE = '''<!DOCTYPE html>
 
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    PORT = 5000
+    # Flask reloader가 꺼진 자식 프로세스에서만 브라우저를 한 번 열도록 제어
+    import os
+    if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
+        threading.Timer(1.0, lambda: webbrowser.open(f'http://localhost:{PORT}')).start()
+    app.run(debug=True, host='0.0.0.0', port=PORT)
