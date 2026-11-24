@@ -128,6 +128,15 @@ def classify(path: Path) -> tuple[str, str]:
     return channel, flag
 
 
+# 20261121_073238E.MP4 처럼 숫자 뒤 한 글자로 종류를 표시하는 기종
+TRAIL_RX = re.compile(r"(?<=\d)([enpm])\.[a-z0-9]+$", re.I)
+
+
+def trailing_letter(name: str) -> str | None:
+    m = TRAIL_RX.search(name)
+    return m.group(1).upper() if m else None
+
+
 def probe(path: Path, c: Clip) -> bool:
     p = run(["ffprobe", "-v", "error", "-print_format", "json",
              "-show_format", "-show_streams", str(path)], timeout=60)
@@ -413,15 +422,39 @@ def main() -> int:
         resolve_dt(c, f)
         clips.append(c)
 
+    # 파일명 끝 글자(E/P/N/M)가 종류 표시인지 판단. 전부 같으면 구분자가 아니다.
+    letters = [trailing_letter(c.name) for c in clips]
+    n_e = sum(1 for x in letters if x == "E")
+    if n_e and n_e / len(clips) > 0.8:
+        print(f"참고: {n_e}/{len(clips)}개가 이름 끝 'E'입니다. "
+              f"전부 같으므로 이벤트 구분자로 쓰지 않습니다.\n")
+    else:
+        for c, x in zip(clips, letters):
+            if not c.event_flag:
+                c.event_flag = {"E": "event", "P": "parking"}.get(x or "", "")
+
     if args.list_dates:
-        from collections import Counter
-        print("날짜별 파일 수 (판정 근거별):")
-        for src in ("filename", "metadata", "mtime"):
-            cnt = Counter(c.dt[:10] for c in clips if c.dt_source == src)
-            if cnt:
-                print(f"  [{src}]")
-                for d, n in sorted(cnt.items()):
-                    print(f"    {d}  {n}개")
+        from collections import defaultdict
+        agg: dict = defaultdict(lambda: [0, 0.0, 0.0])
+        for c in clips:
+            k = (Path(c.path).parent.name, c.dt[:10], c.dt_source)
+            agg[k][0] += 1
+            agg[k][1] += c.size_mb
+            agg[k][2] += c.duration_sec or 0
+        print(f"{'폴더':<10} {'날짜':<12} {'개수':>5} {'용량':>9} {'길이':>9}  근거")
+        print("-" * 62)
+        for (folder, d, src), (n, mb, sec) in sorted(agg.items()):
+            print(f"{folder:<10} {d:<12} {n:>5} {mb / 1024:>7.1f}GB "
+                  f"{sec / 60:>7.0f}분  {src}")
+        tot_mb = sum(c.size_mb for c in clips)
+        tot_sec = sum(c.duration_sec or 0 for c in clips)
+        print("-" * 62)
+        print(f"합계 {len(clips)}개 / {tot_mb / 1024:.1f} GB / {tot_sec / 3600:.1f} 시간")
+        if tot_sec:
+            print(f"\n전체를 분석할 경우 태블릿 예상 소요: "
+                  f"1단계 약 {tot_sec / 60 / 40:.0f}~{tot_sec / 60 / 15:.0f}분, "
+                  f"2단계(상위 후보만) 약 10~25분")
+            print("기간을 좁힐수록 빨라집니다 (--from / --to)")
         return 0
 
     sel = clips
