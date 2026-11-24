@@ -314,17 +314,23 @@ def main() -> int:
     ap.add_argument("--to", dest="dto", help="종료 날짜 YYYY-MM-DD (해당일 포함)")
     ap.add_argument("--list-dates", action="store_true", help="날짜 분포만 출력하고 종료")
     ap.add_argument("--stage1-only", action="store_true", help="오디오 분석만 (빠름)")
-    ap.add_argument("--stage2-top", type=int, default=12,
-                    help="영상 분석할 상위 후보 수 (기본 12)")
+    ap.add_argument("--stage2-top", type=int, default=20,
+                    help="영상 분석할 상위 후보 수 (기본 20)")
     ap.add_argument("--jump-db", type=float, default=12.0, help="충격음 판정 dB 상승폭")
-    ap.add_argument("--floor-db", type=float, default=-20.0, help="충격음 절대 최소 dBFS")
+    ap.add_argument("--floor-db", type=float, default=-32.0, help="충격음 절대 최소 dBFS")
     ap.add_argument("--scene-thr", type=float, default=0.18, help="화면 급변 임계값")
+    ap.add_argument("--sensitive", action="store_true",
+                    help="감도 상향 (약한 긁힘용). 오탐이 늘지만 놓칠 확률이 줄어든다")
     ap.add_argument("--min-score", type=int, default=0, help="리포트 최소 점수")
-    ap.add_argument("--frames", type=int, default=6, help="프레임 추출할 상위 후보 수")
+    ap.add_argument("--frames", type=int, default=10, help="프레임 추출할 상위 후보 수")
     ap.add_argument("--frame-width", type=int, default=960)
     ap.add_argument("--timeout", type=int, default=0, help="파일당 제한 시간(초), 0=무제한")
     ap.add_argument("--out", type=Path, default=None, help="리포트 경로(.json/.csv)")
     args = ap.parse_args()
+    if args.sensitive:
+        args.jump_db, args.floor_db, args.scene_thr = 8.0, -42.0, 0.12
+        args.stage2_top, args.frames = max(args.stage2_top, 30), max(args.frames, 15)
+        print("감도 상향 모드: jump>=8dB, floor>=-42dBFS, scene>=0.12\n")
 
     for tool in ("ffprobe", "ffmpeg"):
         if shutil.which(tool) is None:
