@@ -287,6 +287,57 @@ def extract_frames(path: Path, times: list[float], outdir: Path, width: int,
     return made
 
 
+def build_sheets(frames: list[tuple[str, str]], outdir: Path,
+                 cols: int, rows: int, tile_w: int) -> list[str]:
+    """프레임들을 번호 붙은 '컨택트 시트' 몇 장으로 합친다.
+    frames: (jpg경로, 설명) 목록. 반환: 생성된 시트 경로들.
+    업로드 장수를 줄이기 위한 것으로, 시트 1장 = 최대 cols*rows 프레임.
+    """
+    if not frames:
+        return []
+    sheets_dir = outdir / "sheets"
+    sheets_dir.mkdir(parents=True, exist_ok=True)
+    tmp = sheets_dir / ".tmp"
+    per = cols * rows
+    tile_h = int(tile_w * 9 / 16)
+    made: list[str] = []
+    index_lines: list[str] = []
+
+    for si in range(0, len(frames), per):
+        batch = frames[si:si + per]
+        sheet_no = si // per + 1
+        shutil.rmtree(tmp, ignore_errors=True)
+        tmp.mkdir(parents=True)
+        for i, (src, _) in enumerate(batch, 1):
+            shutil.copyfile(src, tmp / f"{i:03d}.jpg")
+
+        base = (f"scale={tile_w}:{tile_h}:force_original_aspect_ratio=decrease,"
+                f"pad={tile_w}:{tile_h}:(ow-iw)/2:(oh-ih)/2:color=black")
+        label = (",drawtext=text='%{eif\\:n+1\\:d}':fontcolor=yellow:fontsize="
+                 f"{max(18, tile_w // 16)}:box=1:boxcolor=black@0.6:boxborderw=6:x=10:y=8")
+        out = sheets_dir / f"sheet{sheet_no:02d}.jpg"
+        cmd = ["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-y",
+               "-start_number", "1", "-i", str(tmp / "%03d.jpg"),
+               "-vf", f"{base}{label},tile={cols}x{rows}", "-frames:v", "1",
+               "-q:v", "4", str(out)]
+        p = run(cmd, timeout=180)
+        if p.returncode != 0:  # drawtext(libfreetype) 없는 빌드 → 번호 없이 재시도
+            cmd[cmd.index("-vf") + 1] = f"{base},tile={cols}x{rows}"
+            p = run(cmd, timeout=180)
+        if p.returncode == 0 and out.exists():
+            made.append(str(out))
+            index_lines.append(f"[{out.name}] (왼쪽→오른쪽, 위→아래 순서)")
+            for i, (_, desc) in enumerate(batch, 1):
+                index_lines.append(f"  {i:>2}. {desc}")
+            index_lines.append("")
+        else:
+            index_lines.append(f"[sheet{sheet_no:02d}] 생성 실패: {p.stderr.strip()[:200]}")
+
+    shutil.rmtree(tmp, ignore_errors=True)
+    (sheets_dir / "index.txt").write_text("\n".join(index_lines), encoding="utf-8")
+    return made
+
+
 def collect(root: Path) -> list[Path]:
     if root.is_file():
         return [root]
@@ -324,6 +375,9 @@ def main() -> int:
     ap.add_argument("--min-score", type=int, default=0, help="리포트 최소 점수")
     ap.add_argument("--frames", type=int, default=10, help="프레임 추출할 상위 후보 수")
     ap.add_argument("--frame-width", type=int, default=960)
+    ap.add_argument("--sheet-cols", type=int, default=3, help="컨택트 시트 가로 칸 수")
+    ap.add_argument("--sheet-rows", type=int, default=4, help="컨택트 시트 세로 칸 수")
+    ap.add_argument("--no-sheet", action="store_true", help="컨택트 시트 만들지 않음")
     ap.add_argument("--timeout", type=int, default=0, help="파일당 제한 시간(초), 0=무제한")
     ap.add_argument("--out", type=Path, default=None, help="리포트 경로(.json/.csv)")
     args = ap.parse_args()
@@ -412,16 +466,32 @@ def main() -> int:
 
     # ---- 프레임 추출
     outdir = args.root.parent / "impact_frames" if args.root.is_dir() else args.root.parent
+    sheet_items: list[tuple[str, str]] = []
     try:
         for c in ranked[:args.frames]:
             times = cluster(c.audio_hits + c.scene_hits[:3])[:4]
-            if times:
-                c.frames = extract_frames(Path(c.path), times, outdir,
-                                          args.frame_width)
+            if not times:
+                continue
+            c.frames = extract_frames(Path(c.path), times, outdir, args.frame_width)
+            for fp in c.frames:
+                m = re.search(r"__t([\d.]+)_(\d)\.jpg$", fp)
+                t, k = (m.group(1), int(m.group(2))) if m else ("?", 1)
+                off = {0: "-0.6s", 1: "", 2: "+0.6s"}.get(k, "")
+                sheet_items.append(
+                    (fp, f"{c.name}  t={t}s{off}  [{c.score}점/{c.channel}"
+                         f"{'/' + c.event_flag if c.event_flag else ''}]"))
         if any(c.frames for c in ranked):
-            print(f"\n프레임 저장: {outdir}")
+            print(f"\n프레임 저장: {outdir}  ({len(sheet_items)}장)")
     except OSError as e:
         print(f"\n프레임 추출 실패: {e}", file=sys.stderr)
+
+    if sheet_items and not args.no_sheet:
+        sheets = build_sheets(sheet_items, outdir, args.sheet_cols,
+                              args.sheet_rows, args.frame_width // 2)
+        if sheets:
+            print(f"컨택트 시트 {len(sheets)}장: {outdir / 'sheets'}")
+            print(f"  → 이 {len(sheets)}장만 업로드하면 됩니다 "
+                  f"(index.txt 에 번호별 출처 기록)")
 
     # ---- 리포트
     print("\n" + "=" * 70)
