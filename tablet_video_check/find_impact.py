@@ -256,7 +256,10 @@ def score_clip(c: Clip, jump_db: float) -> None:
     s, why = 0, []
     if c.event_flag == "event":
         s += 45
-        why.append("블랙박스 이벤트(G센서) 파일로 표시됨")
+        why.append("G센서 충격 이벤트 파일(E)")
+    elif c.event_flag == "motion":
+        s += 8
+        why.append("움직임 감지 녹화(M) — 충격과 무관할 수 있음")
     elif c.event_flag == "parking":
         s += 10
         why.append("주차 녹화 파일")
@@ -424,16 +427,28 @@ def main() -> int:
         resolve_dt(c, f)
         clips.append(c)
 
-    # 파일명 끝 글자(E/P/N/M)가 종류 표시인지 판단. 전부 같으면 구분자가 아니다.
-    letters = [trailing_letter(c.name) for c in clips]
-    n_e = sum(1 for x in letters if x == "E")
-    if n_e and n_e / len(clips) > 0.8:
-        print(f"참고: {n_e}/{len(clips)}개가 이름 끝 'E'입니다. "
-              f"전부 같으므로 이벤트 구분자로 쓰지 않습니다.\n")
-    else:
-        for c, x in zip(clips, letters):
-            if not c.event_flag:
-                c.event_flag = {"E": "event", "P": "parking"}.get(x or "", "")
+    # 파일명 끝 글자(E=충격이벤트 / M=움직임 / P=주차 / N=일반)로 종류를 판단한다.
+    # 단, 한 폴더 안에서 거의 전부 같은 글자면 그건 구분자가 아니라 그냥 작명 규칙이다.
+    from collections import Counter, defaultdict
+    by_folder: dict[str, list] = defaultdict(list)
+    for c in clips:
+        by_folder[Path(c.path).parent.name].append((c, trailing_letter(c.name)))
+
+    print("파일명 끝 글자 분포:")
+    for folder, items in sorted(by_folder.items()):
+        cnt = Counter(x or "(없음)" for _, x in items)
+        detail = ", ".join(f"{k} {v}개" for k, v in sorted(cnt.items()))
+        n_e = cnt.get("E", 0)
+        if n_e and n_e / len(items) > 0.8:
+            print(f"  {folder}: {detail}  → 거의 전부 E이므로 구분자로 쓰지 않음")
+            continue
+        print(f"  {folder}: {detail}")
+        for c, x in items:
+            if x == "E":          # 폴더명보다 구체적이므로 덮어쓴다
+                c.event_flag = "event"
+            elif not c.event_flag:
+                c.event_flag = {"P": "parking", "M": "motion"}.get(x or "", "")
+    print()
 
     if args.list_dates:
         from collections import defaultdict
