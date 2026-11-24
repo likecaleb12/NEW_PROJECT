@@ -378,6 +378,9 @@ def main() -> int:
     ap.add_argument("--sheet-cols", type=int, default=3, help="컨택트 시트 가로 칸 수")
     ap.add_argument("--sheet-rows", type=int, default=4, help="컨택트 시트 세로 칸 수")
     ap.add_argument("--no-sheet", action="store_true", help="컨택트 시트 만들지 않음")
+    ap.add_argument("--outdir", type=Path, default=None,
+                    help="프레임/시트/리포트 저장 폴더 (기본: 영상 폴더의 상위). "
+                         "/sdcard 쓰기가 막히면 ~/impact 같은 Termux 내부 경로를 쓰세요")
     ap.add_argument("--timeout", type=int, default=0, help="파일당 제한 시간(초), 0=무제한")
     ap.add_argument("--out", type=Path, default=None, help="리포트 경로(.json/.csv)")
     args = ap.parse_args()
@@ -465,7 +468,17 @@ def main() -> int:
     ranked = [c for c in ranked if c.score >= args.min_score]
 
     # ---- 프레임 추출
-    outdir = args.root.parent / "impact_frames" if args.root.is_dir() else args.root.parent
+    base_dir = args.outdir or (args.root.parent if args.root.is_dir() else args.root.parent)
+    outdir = base_dir / "impact_frames" if args.outdir is None else base_dir
+    try:
+        outdir.mkdir(parents=True, exist_ok=True)
+        probe_file = outdir / ".write_test"
+        probe_file.write_text("x")
+        probe_file.unlink()
+    except OSError as e:
+        print(f"\n출력 폴더에 쓸 수 없습니다 ({outdir}): {e}\n"
+              f"  --outdir ~/impact 처럼 Termux 내부 경로를 지정하세요.", file=sys.stderr)
+        return 2
     sheet_items: list[tuple[str, str]] = []
     try:
         for c in ranked[:args.frames]:
@@ -506,8 +519,7 @@ def main() -> int:
         if c.frames:
             print(f"   프레임 {len(c.frames)}장")
 
-    out = args.out or (args.root.parent /
-                       f"impact_report_{time.strftime('%Y%m%d_%H%M%S')}.json")
+    out = args.out or (outdir / f"impact_report_{time.strftime('%Y%m%d_%H%M%S')}.json")
     data = []
     for c in ranked:
         d = asdict(c)
