@@ -129,7 +129,7 @@ def classify(path: Path) -> tuple[str, str]:
 
 
 # 20261121_073238E.MP4 처럼 숫자 뒤 한 글자로 종류를 표시하는 기종
-TRAIL_RX = re.compile(r"(?<=\d)([enpm])\.[a-z0-9]+$", re.I)
+TRAIL_RX = re.compile(r"(?<=\d)([denpm])\.[a-z0-9]+$", re.I)
 
 
 def trailing_letter(name: str) -> str | None:
@@ -282,20 +282,22 @@ def score_clip(c: Clip, jump_db: float) -> None:
 
 
 def extract_frames(path: Path, times: list[float], outdir: Path, width: int,
-                   span: float = 0.6, n: int = 3) -> list[str]:
-    """후보 시각 주변 프레임을 JPEG로 추출."""
+                   span: float = 0.6, n: int = 3) -> list[tuple[str, float, float]]:
+    """후보 시각 주변 프레임을 JPEG로 추출. 반환: (파일경로, 기준시각, 오프셋초).
+    n=1이면 기준 시각 한 장만, n>=2면 앞뒤로 고르게 n장."""
     outdir.mkdir(parents=True, exist_ok=True)
-    made: list[str] = []
+    made: list[tuple[str, float, float]] = []
     stem = re.sub(r"[^\w.-]", "_", path.stem)[:40]
+    offsets = [0.0] if n <= 1 else [-span + i * (2 * span / (n - 1)) for i in range(n)]
     for t in times:
-        for k in range(n):
-            ts = max(0.0, t - span + k * span)
+        for k, off in enumerate(offsets):
+            ts = max(0.0, t + off)
             out = outdir / f"{stem}__t{t:06.2f}_{k}.jpg"
             p = run(["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-y",
                      "-ss", f"{ts:.3f}", "-i", str(path), "-frames:v", "1",
                      "-vf", f"scale={width}:-2", "-q:v", "3", str(out)], timeout=90)
             if p.returncode == 0 and out.exists() and out.stat().st_size > 0:
-                made.append(str(out))
+                made.append((str(out), t, off))
     return made
 
 
@@ -386,6 +388,11 @@ def main() -> int:
                     help="감도 상향 (약한 긁힘용). 오탐이 늘지만 놓칠 확률이 줄어든다")
     ap.add_argument("--min-score", type=int, default=0, help="리포트 최소 점수")
     ap.add_argument("--frames", type=int, default=10, help="프레임 추출할 상위 후보 수")
+    ap.add_argument("--match", default=None,
+                    help=r"파일명 정규식 필터. 예: --match 'E\.MP4$' 는 E로 끝나는 파일만")
+    ap.add_argument("--shots", type=int, default=3,
+                    help="한 시점당 뽑을 장수. 1이면 그 순간 한 장(넓게 훑기), "
+                         "3이면 앞/그때/뒤 (기본)")
     ap.add_argument("--times-per-clip", type=int, default=2,
                     help="영상 1개당 프레임 뽑을 시점 수 (시점마다 3장). "
                          "1로 두면 넓게 훑고, 올리면 한 영상을 자세히 본다")
@@ -411,9 +418,18 @@ def main() -> int:
         print(f"경로 없음: {args.root}", file=sys.stderr)
         return 2
 
-    files = collect(args.root)
+    all_files = collect(args.root)
+    files = all_files
+    if args.match:
+        try:
+            rx = re.compile(args.match, re.I)
+        except re.error as e:
+            print(f"--match 정규식 오류: {e}", file=sys.stderr)
+            return 2
+        files = [f for f in all_files if rx.search(f.name)]
+        print(f"이름 필터 '{args.match}' → {len(all_files)}개 중 {len(files)}개 선택")
     if not files:
-        print("동영상 파일이 없습니다.")
+        print("조건에 맞는 동영상 파일이 없습니다.")
         return 0
     print(f"총 {len(files)}개 동영상 발견\n")
 
@@ -429,25 +445,33 @@ def main() -> int:
 
     # 파일명 끝 글자(E=충격이벤트 / M=움직임 / P=주차 / N=일반)로 종류를 판단한다.
     # 단, 한 폴더 안에서 거의 전부 같은 글자면 그건 구분자가 아니라 그냥 작명 규칙이다.
+    # 비율은 --match 로 거르기 전의 전체 목록으로 따진다. 걸러낸 뒤에 세면
+    # 무조건 100% E가 되어 구분자가 아니라고 잘못 판단한다.
     from collections import Counter, defaultdict
-    by_folder: dict[str, list] = defaultdict(list)
-    for c in clips:
-        by_folder[Path(c.path).parent.name].append((c, trailing_letter(c.name)))
+    folder_all: dict[str, Counter] = defaultdict(Counter)
+    for f in all_files:
+        folder_all[f.parent.name][trailing_letter(f.name) or "(없음)"] += 1
 
-    print("파일명 끝 글자 분포:")
-    for folder, items in sorted(by_folder.items()):
-        cnt = Counter(x or "(없음)" for _, x in items)
+    print("파일명 끝 글자 분포 (폴더 전체 기준):")
+    suppress: set[str] = set()
+    for folder, cnt in sorted(folder_all.items()):
+        total = sum(cnt.values())
         detail = ", ".join(f"{k} {v}개" for k, v in sorted(cnt.items()))
-        n_e = cnt.get("E", 0)
-        if n_e and n_e / len(items) > 0.8:
+        if cnt.get("E", 0) / total > 0.8:
+            suppress.add(folder)
             print(f"  {folder}: {detail}  → 거의 전부 E이므로 구분자로 쓰지 않음")
+        else:
+            print(f"  {folder}: {detail}")
+
+    for c in clips:
+        folder = Path(c.path).parent.name
+        if folder in suppress:
             continue
-        print(f"  {folder}: {detail}")
-        for c, x in items:
-            if x == "E":          # 폴더명보다 구체적이므로 덮어쓴다
-                c.event_flag = "event"
-            elif not c.event_flag:
-                c.event_flag = {"P": "parking", "M": "motion"}.get(x or "", "")
+        x = trailing_letter(c.name)
+        if x == "E":              # 폴더명보다 구체적이므로 덮어쓴다
+            c.event_flag = "event"
+        elif not c.event_flag:
+            c.event_flag = {"P": "parking", "M": "motion"}.get(x or "", "")
     print()
 
     if args.list_dates:
@@ -534,14 +558,19 @@ def main() -> int:
         for c in ranked[:args.frames]:
             times = cluster(c.audio_hits + c.scene_hits[:3])[:max(1, args.times_per_clip)]
             if not times:
-                continue
-            c.frames = extract_frames(Path(c.path), times, outdir, args.frame_width)
-            for fp in c.frames:
-                m = re.search(r"__t([\d.]+)_(\d)\.jpg$", fp)
-                t, k = (m.group(1), int(m.group(2))) if m else ("?", 1)
-                off = {0: "-0.6s", 1: "", 2: "+0.6s"}.get(k, "")
+                # 신호가 안 잡혀도 G센서 이벤트 파일은 반드시 본다. 블랙박스는 보통
+                # 충격 순간을 영상 가운데 두고 저장하므로 중간 지점을 찍는다.
+                if c.event_flag == "event" and c.duration_sec:
+                    times = [round(c.duration_sec / 2, 2)]
+                else:
+                    continue
+            got = extract_frames(Path(c.path), times, outdir, args.frame_width,
+                                 n=max(1, args.shots))
+            c.frames = [g[0] for g in got]
+            for fp, t, off in got:
+                lab = "" if abs(off) < 0.01 else f"{off:+.1f}s"
                 sheet_items.append(
-                    (fp, f"{c.name}  t={t}s{off}  [{c.score}점/{c.channel}"
+                    (fp, f"{c.name}  t={t:.1f}s{lab}  [{c.score}점/{c.channel}"
                          f"{'/' + c.event_flag if c.event_flag else ''}]"))
         if any(c.frames for c in ranked):
             print(f"\n프레임 저장: {outdir}  ({len(sheet_items)}장)")
