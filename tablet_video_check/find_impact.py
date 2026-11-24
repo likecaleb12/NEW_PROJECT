@@ -281,21 +281,31 @@ def score_clip(c: Clip, jump_db: float) -> None:
     c.reasons = why
 
 
+CROPS = {
+    "none": "",
+    # 좌측 앞 범퍼 쪽을 보려면 화면 왼쪽 절반의 아래 3/4가 유효 구간이다.
+    "left": "crop=iw*0.5:ih*0.75:0:ih*0.25,",
+    "right": "crop=iw*0.5:ih*0.75:iw*0.5:ih*0.25,",
+}
+
+
 def extract_frames(path: Path, times: list[float], outdir: Path, width: int,
-                   span: float = 0.6, n: int = 3) -> list[tuple[str, float, float]]:
+                   span: float = 0.6, n: int = 3,
+                   crop: str = "none") -> list[tuple[str, float, float]]:
     """후보 시각 주변 프레임을 JPEG로 추출. 반환: (파일경로, 기준시각, 오프셋초).
-    n=1이면 기준 시각 한 장만, n>=2면 앞뒤로 고르게 n장."""
+    n=1이면 기준 시각 한 장만, n>=2면 ±span 구간에 고르게 n장."""
     outdir.mkdir(parents=True, exist_ok=True)
     made: list[tuple[str, float, float]] = []
     stem = re.sub(r"[^\w.-]", "_", path.stem)[:40]
     offsets = [0.0] if n <= 1 else [-span + i * (2 * span / (n - 1)) for i in range(n)]
+    vf = f"{CROPS.get(crop, '')}scale={width}:-2"
     for t in times:
         for k, off in enumerate(offsets):
             ts = max(0.0, t + off)
             out = outdir / f"{stem}__t{t:06.2f}_{k}.jpg"
             p = run(["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-y",
                      "-ss", f"{ts:.3f}", "-i", str(path), "-frames:v", "1",
-                     "-vf", f"scale={width}:-2", "-q:v", "3", str(out)], timeout=90)
+                     "-vf", vf, "-q:v", "3", str(out)], timeout=90)
             if p.returncode == 0 and out.exists() and out.stat().st_size > 0:
                 made.append((str(out), t, off))
     return made
@@ -392,7 +402,12 @@ def main() -> int:
                     help=r"파일명 정규식 필터. 예: --match 'E\.MP4$' 는 E로 끝나는 파일만")
     ap.add_argument("--shots", type=int, default=3,
                     help="한 시점당 뽑을 장수. 1이면 그 순간 한 장(넓게 훑기), "
-                         "3이면 앞/그때/뒤 (기본)")
+                         "3이면 앞/그때/뒤 (기본). 9 정도면 촘촘히 본다")
+    ap.add_argument("--span", type=float, default=0.6,
+                    help="기준 시각 앞뒤로 몇 초를 훑을지 (기본 0.6). "
+                         "--shots 와 같이 쓴다: --shots 9 --span 3 이면 ±3초를 9장으로")
+    ap.add_argument("--crop", choices=["none", "left", "right"], default="none",
+                    help="화면 일부만 잘라 확대. left=운전석(좌측) 쪽, right=조수석 쪽")
     ap.add_argument("--times-per-clip", type=int, default=2,
                     help="영상 1개당 프레임 뽑을 시점 수 (시점마다 3장). "
                          "1로 두면 넓게 훑고, 올리면 한 영상을 자세히 본다")
@@ -565,7 +580,7 @@ def main() -> int:
                 else:
                     continue
             got = extract_frames(Path(c.path), times, outdir, args.frame_width,
-                                 n=max(1, args.shots))
+                                 span=args.span, n=max(1, args.shots), crop=args.crop)
             c.frames = [g[0] for g in got]
             for fp, t, off in got:
                 lab = "" if abs(off) < 0.01 else f"{off:+.1f}s"
