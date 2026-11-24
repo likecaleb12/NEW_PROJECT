@@ -383,6 +383,9 @@ def main() -> int:
                     help="감도 상향 (약한 긁힘용). 오탐이 늘지만 놓칠 확률이 줄어든다")
     ap.add_argument("--min-score", type=int, default=0, help="리포트 최소 점수")
     ap.add_argument("--frames", type=int, default=10, help="프레임 추출할 상위 후보 수")
+    ap.add_argument("--times-per-clip", type=int, default=2,
+                    help="영상 1개당 프레임 뽑을 시점 수 (시점마다 3장). "
+                         "1로 두면 넓게 훑고, 올리면 한 영상을 자세히 본다")
     ap.add_argument("--frame-width", type=int, default=960)
     ap.add_argument("--sheet-cols", type=int, default=3, help="컨택트 시트 가로 칸 수")
     ap.add_argument("--sheet-rows", type=int, default=4, help="컨택트 시트 세로 칸 수")
@@ -395,7 +398,6 @@ def main() -> int:
     args = ap.parse_args()
     if args.sensitive:
         args.jump_db, args.floor_db, args.scene_thr = 8.0, -42.0, 0.12
-        args.stage2_top, args.frames = max(args.stage2_top, 30), max(args.frames, 15)
         print("감도 상향 모드: jump>=8dB, floor>=-42dBFS, scene>=0.12\n")
 
     for tool in ("ffprobe", "ffmpeg"):
@@ -515,7 +517,7 @@ def main() -> int:
     sheet_items: list[tuple[str, str]] = []
     try:
         for c in ranked[:args.frames]:
-            times = cluster(c.audio_hits + c.scene_hits[:3])[:4]
+            times = cluster(c.audio_hits + c.scene_hits[:3])[:max(1, args.times_per_clip)]
             if not times:
                 continue
             c.frames = extract_frames(Path(c.path), times, outdir, args.frame_width)
